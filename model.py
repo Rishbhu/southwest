@@ -95,8 +95,22 @@ def generate_dummy_data(start_year=2015, end_year=2024):
 def train_model(df):
     """
     Train a HistGradientBoosting model to predict baggage_fees_usd
-    from synthetic quarterly data.
+    from quarterly data (dummy or real).
+
+    Returns:
+        model: fitted sklearn Pipeline
+        X: feature DataFrame
+        y: target Series
+        numeric_features: list of numeric feature names
+        categorical_features: list of categorical feature names
+        metrics: dict with MAE and RMSE on a chronological holdout set
     """
+
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
 
     numeric_features = [
         "passengers",
@@ -109,6 +123,7 @@ def train_model(df):
         "baggage_fees_lag1",
         "passengers_lag1",
     ]
+
     categorical_features = ["year"]
 
     X = df[numeric_features + categorical_features]
@@ -138,7 +153,7 @@ def train_model(df):
         ]
     )
 
-    # Chronological train/test split: last 20% is test
+    # Chronological train/test split: last 20% as test
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -147,11 +162,13 @@ def train_model(df):
     y_pred = model.predict(X_test)
 
     mae = mean_absolute_error(y_test, y_pred)
-    rmse = mean_squared_error(y_test, y_pred, squared=False)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = mse ** 0.5  # manual sqrt for old sklearn versions
 
     metrics = {"MAE": mae, "RMSE": rmse}
 
     return model, X, y, numeric_features, categorical_features, metrics
+
 
 
 # ---------------------------------------------------------

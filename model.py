@@ -25,46 +25,40 @@ def generate_dummy_data(start_year=2015, end_year=2024):
 
     for year in range(start_year, end_year + 1):
         for q in range(1, 5):
-            # Trend over years (growing traffic)
             years_since_start = year - start_year
 
-            # Base passengers in millions with growth and some seasonality
             seasonal_boost = {
-                1: 0.95,  # Q1 slightly lower
-                2: 1.00,  # Q2 normal
-                3: 1.10,  # Q3 higher (summer travel)
-                4: 1.05,  # Q4 decent (holidays)
+                1: 0.95,
+                2: 1.00,
+                3: 1.10,
+                4: 1.05,
             }[q]
 
-            base_passengers = 18_000_000  # starting ballpark
+            base_passengers = 18_000_000
             passengers = (
                 base_passengers
-                * (1 + 0.04 * years_since_start)  # ~4% growth per year
+                * (1 + 0.04 * years_since_start)
                 * seasonal_boost
             )
-            passengers += rng.normal(0, 800_000)  # noise
+            passengers += rng.normal(0, 800_000)
             passengers = max(passengers, 5_000_000)
 
-            # Departures scale with passengers but with noise
             departures = passengers / 150 + rng.normal(0, 500)
             departures = max(departures, 30_000)
 
-            # Load factor between 0.7 and 0.9
             load_factor = 0.76 + rng.normal(0, 0.03)
             load_factor = float(np.clip(load_factor, 0.7, 0.9))
 
-            # Seat miles (asm) and revenue miles (rpm)
-            asm = passengers / load_factor * 900  # fake average distance
+            asm = passengers / load_factor * 900
             rpm = asm * load_factor
 
-            # Baggage revenue ~ $3–5 per passenger + noise
             avg_bag_revenue_per_pax = 3.5 + rng.normal(0, 0.4)
             baggage_fees_usd = passengers * avg_bag_revenue_per_pax
             baggage_fees_usd += rng.normal(0, 5_000_000)
             baggage_fees_usd = max(baggage_fees_usd, 10_000_000)
 
-            # Quarter end date for plotting
-            period = pd.Period(year=year, quarter=q)
+            # 🔧 FIXED: use string "YYYYQX" instead of year= / quarter=
+            period = pd.Period(f"{year}Q{q}")
             date = period.to_timestamp(how="end")
 
             rows.append(
@@ -83,18 +77,16 @@ def generate_dummy_data(start_year=2015, end_year=2024):
 
     df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
 
-    # Cyclical encoding for seasonality
     df["quarter_sin"] = np.sin(2 * np.pi * (df["quarter"] - 1) / 4)
     df["quarter_cos"] = np.cos(2 * np.pi * (df["quarter"] - 1) / 4)
 
-    # Lag features (previous quarter)
     df["baggage_fees_lag1"] = df["baggage_fees_usd"].shift(1)
     df["passengers_lag1"] = df["passengers"].shift(1)
 
-    # Drop first row with NaNs
     df = df.dropna().reset_index(drop=True)
 
     return df
+
 
 
 # ---------------------------------------------------------

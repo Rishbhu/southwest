@@ -10,92 +10,100 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
 # ---------------------------------------------------------
-# Helper functions
+# 1. Dummy data generator
 # ---------------------------------------------------------
-def load_and_prepare_data():
+def generate_dummy_data(start_year=2015, end_year=2024):
     """
-    Load BTS baggage & T100 domestic data, merge, and engineer features.
-    Expects:
-      - bts_baggage_fees_clean.csv
-      - t100_domestic_clean.csv
+    Generate synthetic quarterly data for a single airline (Southwest-like).
+    Columns:
+      year, quarter, date, passengers, departures, rpm, asm,
+      load_factor, baggage_fees_usd
     """
 
-    try:
-        baggage = pd.read_csv("bts_baggage_fees_clean.csv")
-        t100 = pd.read_csv("t100_domestic_clean.csv")
-    except FileNotFoundError as e:
-        st.error(
-            f"Could not find required CSV files.\n\n"
-            f"Make sure these exist in the same folder as this app:\n"
-            f"- bts_baggage_fees_clean.csv\n"
-            f"- t100_domestic_clean.csv\n\n"
-            f"Details: {e}"
-        )
-        st.stop()
+    rows = []
+    rng = np.random.default_rng(42)
 
-    baggage.columns = baggage.columns.str.lower()
-    t100.columns = t100.columns.str.lower()
+    for year in range(start_year, end_year + 1):
+        for q in range(1, 5):
+            # Trend over years (growing traffic)
+            years_since_start = year - start_year
 
-    needed_baggage_cols = ["year", "quarter", "carrier", "baggage_fees_usd"]
-    needed_t100_cols = [
-        "year", "quarter", "carrier",
-        "passengers", "departures", "rpm", "asm", "load_factor"
-    ]
+            # Base passengers in millions with growth and some seasonality
+            seasonal_boost = {
+                1: 0.95,  # Q1 slightly lower
+                2: 1.00,  # Q2 normal
+                3: 1.10,  # Q3 higher (summer travel)
+                4: 1.05,  # Q4 decent (holidays)
+            }[q]
 
-    for col in needed_baggage_cols:
-        if col not in baggage.columns:
-            st.error(f"Column '{col}' missing from baggage CSV.")
-            st.stop()
+            base_passengers = 18_000_000  # starting ballpark
+            passengers = (
+                base_passengers
+                * (1 + 0.04 * years_since_start)  # ~4% growth per year
+                * seasonal_boost
+            )
+            passengers += rng.normal(0, 800_000)  # noise
+            passengers = max(passengers, 5_000_000)
 
-    for col in needed_t100_cols:
-        if col not in t100.columns:
-            st.error(f"Column '{col}' missing from T100 CSV.")
-            st.stop()
+            # Departures scale with passengers but with noise
+            departures = passengers / 150 + rng.normal(0, 500)
+            departures = max(departures, 30_000)
 
-    df = baggage[needed_baggage_cols].merge(
-        t100[needed_t100_cols],
-        on=["year", "quarter", "carrier"],
-        how="inner"
-    )
+            # Load factor between 0.7 and 0.9
+            load_factor = 0.76 + rng.normal(0, 0.03)
+            load_factor = float(np.clip(load_factor, 0.7, 0.9))
 
-    # Adjust these aliases to match your carrier naming
-    southwest_aliases = ["Southwest Airlines", "Southwest Airlines Co.", "WN"]
-    df = df[df["carrier"].isin(southwest_aliases)].copy()
+            # Seat miles (asm) and revenue miles (rpm)
+            asm = passengers / load_factor * 900  # fake average distance
+            rpm = asm * load_factor
 
-    if df.empty:
-        st.error(
-            "No Southwest rows found after filtering.\n\n"
-            "Check how 'carrier' is named in your CSVs and update 'southwest_aliases' in the code."
-        )
-        st.stop()
+            # Baggage revenue ~ $3–5 per passenger + noise
+            avg_bag_revenue_per_pax = 3.5 + rng.normal(0, 0.4)
+            baggage_fees_usd = passengers * avg_bag_revenue_per_pax
+            baggage_fees_usd += rng.normal(0, 5_000_000)
+            baggage_fees_usd = max(baggage_fees_usd, 10_000_000)
 
-    # Time index from (year, quarter)
-    df["period"] = pd.PeriodIndex(
-        year=df["year"].astype(int),
-        quarter=df["quarter"].astype(int)
-    )
-    df["date"] = df["period"].dt.to_timestamp(how="end")
+            # Quarter end date for plotting
+            period = pd.Period(year=year, quarter=q)
+            date = period.to_timestamp(how="end")
 
-    df = df.sort_values("date").reset_index(drop=True)
+            rows.append(
+                {
+                    "year": year,
+                    "quarter": q,
+                    "date": date,
+                    "passengers": passengers,
+                    "departures": departures,
+                    "rpm": rpm,
+                    "asm": asm,
+                    "load_factor": load_factor,
+                    "baggage_fees_usd": baggage_fees_usd,
+                }
+            )
 
-    # Cyclical encoding for quarter
+    df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+    # Cyclical encoding for seasonality
     df["quarter_sin"] = np.sin(2 * np.pi * (df["quarter"] - 1) / 4)
     df["quarter_cos"] = np.cos(2 * np.pi * (df["quarter"] - 1) / 4)
 
-    # Lag features
+    # Lag features (previous quarter)
     df["baggage_fees_lag1"] = df["baggage_fees_usd"].shift(1)
     df["passengers_lag1"] = df["passengers"].shift(1)
 
-    # Drop first row with NaNs from lag
+    # Drop first row with NaNs
     df = df.dropna().reset_index(drop=True)
 
     return df
 
 
+# ---------------------------------------------------------
+# 2. Model training
+# ---------------------------------------------------------
 def train_model(df):
     """
-    Train a HistGradientBoosting model to predict baggage_fees_usd.
-    Returns the fitted pipeline and (X, y).
+    Train a HistGradientBoosting model to predict baggage_fees_usd
+    from synthetic quarterly data.
     """
 
     numeric_features = [
@@ -109,7 +117,6 @@ def train_model(df):
         "baggage_fees_lag1",
         "passengers_lag1",
     ]
-
     categorical_features = ["year"]
 
     X = df[numeric_features + categorical_features]
@@ -139,7 +146,7 @@ def train_model(df):
         ]
     )
 
-    # Simple train/test split: last 20% as test (still chronological)
+    # Chronological train/test split: last 20% is test
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -150,19 +157,24 @@ def train_model(df):
     mae = mean_absolute_error(y_test, y_pred)
     rmse = mean_squared_error(y_test, y_pred, squared=False)
 
-    metrics = {
-        "MAE": mae,
-        "RMSE": rmse,
-    }
+    metrics = {"MAE": mae, "RMSE": rmse}
 
     return model, X, y, numeric_features, categorical_features, metrics
 
 
+# ---------------------------------------------------------
+# 3. Helper to build future row for simulator
+# ---------------------------------------------------------
 def make_future_row(
-    year, quarter,
-    passengers, departures, rpm, asm,
+    year,
+    quarter,
+    passengers,
+    departures,
+    rpm,
+    asm,
     load_factor,
-    prev_baggage_fees, prev_passengers
+    prev_baggage_fees,
+    prev_passengers,
 ):
     quarter_sin = np.sin(2 * np.pi * (quarter - 1) / 4)
     quarter_cos = np.cos(2 * np.pi * (quarter - 1) / 4)
@@ -184,90 +196,98 @@ def make_future_row(
 
 
 # ---------------------------------------------------------
-# Streamlit UI
+# 4. Streamlit UI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Southwest Baggage Revenue Dashboard",
-    layout="wide"
+    page_title="Southwest Baggage Revenue Prototype",
+    layout="wide",
 )
 
-st.title("✈️ Southwest Baggage Revenue Prediction Dashboard")
+st.title("✈️ Baggage Revenue Prediction – Prototype Dashboard")
 st.caption(
-    "Aggie Data Science Club × Southwest Airlines — "
-    "prototype model using public BTS data"
+    "Aggie Data Science Club × Southwest Airlines (demo with synthetic data)"
 )
 
-with st.spinner("Loading data and training model..."):
-    df = load_and_prepare_data()
+with st.spinner("Generating synthetic data and training model..."):
+    df = generate_dummy_data()
     model, X, y, num_feats, cat_feats, metrics = train_model(df)
 
-# ---------------------------------------------------------
-# Top-level summary / KPIs
-# ---------------------------------------------------------
 latest = df.iloc[-1]
+
+# Compute YoY approx (4 quarters back)
 if len(df) >= 5:
-    # Compare last quarter vs same quarter previous year (approx 4 quarters back)
-    prev_year_idx = len(df) - 5
-    prev_year_row = df.iloc[prev_year_idx]
+    prev_year_row = df.iloc[-5]
     yoy_change = (
-        latest["baggage_fees_usd"] - prev_year_row["baggage_fees_usd"]
-    ) / prev_year_row["baggage_fees_usd"] * 100
+        (latest["baggage_fees_usd"] - prev_year_row["baggage_fees_usd"])
+        / prev_year_row["baggage_fees_usd"]
+        * 100
+    )
 else:
     yoy_change = np.nan
 
+# ---------------------------------------------------------
+# KPI row
+# ---------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
         "Latest Quarter Baggage Revenue (USD)",
-        f"${latest['baggage_fees_usd']:,.0f}"
+        f"${latest['baggage_fees_usd']:,.0f}",
     )
 
 with col2:
     st.metric(
         "Passengers (Latest Quarter)",
-        f"{latest['passengers']:,.0f}"
+        f"{latest['passengers']:,.0f}",
     )
 
 with col3:
-    yoy_label = (
-        f"{yoy_change:,.1f}% vs same quarter last year"
-        if not np.isnan(yoy_change)
-        else "N/A"
-    )
     st.metric(
         "Model Test RMSE (USD)",
         f"${metrics['RMSE']:,.0f}",
-        help=yoy_label
+        help=(
+            f"Approx. YoY change in revenue: {yoy_change:,.1f}%"
+            if not np.isnan(yoy_change)
+            else "YoY change not available"
+        ),
     )
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# Layout: left = time series, right = simulator
+# Layout: left = chart, right = simulator
 # ---------------------------------------------------------
 left, right = st.columns([2, 1])
 
 with left:
-    st.subheader("Baggage Revenue Over Time")
+    st.subheader("Baggage Revenue Over Time (Synthetic)")
     ts_df = df[["date", "baggage_fees_usd"]].set_index("date")
     st.line_chart(ts_df.rename(columns={"baggage_fees_usd": "Baggage Fees (USD)"}))
 
-    with st.expander("Show raw Southwest quarterly data"):
+    with st.expander("Show raw quarterly data"):
         st.dataframe(
-            df[[
-                "year", "quarter", "date",
-                "baggage_fees_usd", "passengers",
-                "departures", "rpm", "asm", "load_factor"
-            ]]
+            df[
+                [
+                "year",
+                "quarter",
+                "date",
+                "baggage_fees_usd",
+                "passengers",
+                "departures",
+                "rpm",
+                "asm",
+                "load_factor",
+                ]
+            ]
         )
 
 with right:
     st.subheader("📈 What-If Revenue Simulator")
 
     st.markdown(
-        "Use this panel to simulate baggage revenue for a future quarter "
-        "by adjusting demand and operational inputs."
+        "Adjust demand and operational inputs to simulate predicted baggage revenue "
+        "for a future quarter."
     )
 
     latest_year = int(latest["year"])
@@ -275,47 +295,44 @@ with right:
 
     sim_year = st.number_input(
         "Year",
-        min_value=2007,
+        min_value=2010,
         max_value=2100,
-        value=latest_year + 1
+        value=latest_year + 1,
     )
-    sim_quarter = st.selectbox(
-        "Quarter",
-        options=[1, 2, 3, 4],
-        index=0
-    )
+    sim_quarter = st.selectbox("Quarter", options=[1, 2, 3, 4], index=0)
 
     st.markdown("**Demand & Operations**")
+
     passengers = st.number_input(
         "Passengers",
         min_value=0,
         value=int(latest["passengers"]),
-        step=100000
+        step=100_000,
     )
     departures = st.number_input(
         "Departures",
         min_value=0,
         value=int(latest["departures"]),
-        step=5000
+        step=5_000,
     )
     rpm = st.number_input(
         "Revenue Passenger Miles (RPM)",
         min_value=0,
         value=int(latest["rpm"]),
-        step=1_000_000_000
+        step=1_000_000_000,
     )
     asm = st.number_input(
         "Available Seat Miles (ASM)",
         min_value=0,
         value=int(latest["asm"]),
-        step=1_000_000_000
+        step=1_000_000_000,
     )
     load_factor = st.slider(
         "Load Factor",
-        min_value=0.4,
-        max_value=1.0,
+        min_value=0.6,
+        max_value=0.95,
         value=float(latest["load_factor"]),
-        step=0.01
+        step=0.01,
     )
 
     st.markdown("**Previous Quarter Context**")
@@ -323,12 +340,12 @@ with right:
     prev_baggage = st.number_input(
         "Previous Quarter Baggage Fees (USD)",
         min_value=0,
-        value=int(latest["baggage_fees_usd"])
+        value=int(latest["baggage_fees_usd"]),
     )
     prev_passengers = st.number_input(
         "Previous Quarter Passengers",
         min_value=0,
-        value=int(latest["passengers"])
+        value=int(latest["passengers"]),
     )
 
     if st.button("Predict Baggage Revenue"):
@@ -341,26 +358,25 @@ with right:
             asm=asm,
             load_factor=load_factor,
             prev_baggage_fees=prev_baggage,
-            prev_passengers=prev_passengers
+            prev_passengers=prev_passengers,
         )
 
         pred = model.predict(future_X)[0]
-        st.success(f"Predicted baggage revenue: **${pred:,.0f}**")
 
+        st.success(f"Predicted baggage revenue: **${pred:,.0f}**")
         st.caption(
-            "Model: HistGradientBoostingRegressor on BTS baggage + T100 data, "
-            "with seasonality + lag features."
+            "Model: gradient-boosted trees on synthetic quarterly data with "
+            "seasonality and lag features."
         )
 
 st.markdown("---")
 
-st.subheader("Model Details")
-
+st.subheader("Model Summary")
 st.markdown(
     """
-- **Target:** Quarterly baggage fee revenue for Southwest (USD)  
-- **Inputs:** Passengers, departures, RPM, ASM, load factor, seasonality (quarter), and lagged baggage/passenger values  
+- **Target:** Quarterly baggage revenue (synthetic, USD)  
+- **Inputs:** Passengers, departures, RPM, ASM, load factor, quarter (seasonality), lagged baggage & passengers  
 - **Model:** HistGradientBoostingRegressor (tree-based gradient boosting)  
-- **Data Source:** Public U.S. Bureau of Transportation Statistics (BTS) datasets
+- **Note:** This is a *prototype* using dummy data; the same pipeline can be fed real Southwest/BTS data.
     """
 )
